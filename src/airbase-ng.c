@@ -243,6 +243,7 @@ struct options
     int weplen, crypt;
 
     int f_essid;
+    int f_mac;
     int promiscuous;
     int beacon_cache;
     int channel;
@@ -269,6 +270,7 @@ struct options
     int cf_count;
     int cf_attack;
     int record_data;
+    int attack_broadcast;
 
     int ti_mtu;         //MTU of tun/tap interface
     int wif_mtu;        //MTU of wireless interface
@@ -400,6 +402,7 @@ pthread_t caffelattepid;
 pthread_t cfragpid;
 
 pESSID_t    rESSID;
+pMAC_t      rBSSID2;
 pMAC_t      rBSSID;
 pMAC_t      rClient;
 pFrag_t     rFragment;
@@ -1128,6 +1131,44 @@ int addESSIDfile(char* filename)
 
         if(strlen(essid))
             addESSID(essid, strlen(essid), 0);
+    }
+
+    fclose(list);
+
+    return 0;
+}
+
+int addESSIDAndMacfile(pMAC_t pMAC, char* filename)
+{
+    FILE *list;
+    char buffer[256+6+1];
+    char essid[256];
+    unsigned char mac[6];
+    int x;
+    char tmp[18];
+
+    list = fopen(filename, "r");
+    if(list == NULL)
+    {
+        perror("Unable to open ESSID-MAC list");
+        return -1;
+    }
+
+    while( fgets(buffer, 256, list) != NULL )
+    {
+        sscanf(buffer, "%17s:%s", mac, essid);
+	// trim trailing whitespace
+        x = strlen(essid) - 1;
+        while (x >= 0 && isspace((int)essid[x]))
+            essid[x--] = 0;
+
+        if(strlen(essid))
+            addESSID(essid, strlen(essid), 0);
+
+	strncpy(tmp, buffer, 17);
+	tmp[17] = '\0';
+        if(getmac(tmp, 1, mac) == 0)
+            addMAC(pMAC, mac);
     }
 
     fclose(list);
@@ -2466,6 +2507,116 @@ int store_wpa_handshake(struct ST_info *st_cur)
     return 0;
 }
 
+int send_broadcast_response(char *fessid, int len, uchar* packet_to_copy, int length, struct AP_conf *apc, int z, uchar smac[6])
+{
+    uchar *buffer;
+    int i;
+    struct timeval tv1;
+    u_int64_t timestamp;
+    int temp_channel;
+
+    uchar *packet = (uchar *)malloc(length+41+len);
+    memcpy(packet, packet_to_copy, length);
+
+    //transform into probe response
+    packet[0] = 0x50;
+
+    if(opt.verbose)
+    {
+        PCT; printf("Got broadcast probe request from %02X:%02X:%02X:%02X:%02X:%02X\n",
+                    smac[0],smac[1],smac[2],smac[3],smac[4],smac[5]);
+    }
+
+    //store the tagged parameters and insert the fixed ones
+    buffer = (uchar*) malloc(length-z);
+    memcpy(buffer, packet+z, length-z);
+
+    memcpy(packet+z, "\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00", 12);  //fixed information
+    packet[z+8] = (apc->interval) & 0xFF;       //beacon interval
+    packet[z+9] = (apc->interval >> 8) & 0xFF;
+    memcpy(packet+z+10, apc->capa, 2);          //capability
+
+    //set timestamp
+    gettimeofday( &tv1,  NULL );
+    timestamp=tv1.tv_sec*1000000 + tv1.tv_usec;
+
+    //copy timestamp into response; a mod 2^64 counter incremented each microsecond
+    for(i=0; i<8; i++)
+    {
+        packet[z+i] = ( timestamp >> (i*8) ) & 0xFF;
+    }
+
+    packet[z+12] = 0x00;
+    packet[z+13] = len;
+    memcpy(packet+z+14, fessid, len);
+
+    //insert tagged parameters
+    memcpy(packet+z+14+len, buffer, length-z); //now we got 2 essid tags... ignore that
+
+    length += 12; //fixed info
+    free(buffer);
+    buffer = NULL;
+    length += 2+len; //default essid
+
+    //add channel
+    packet[length]   = 0x03;
+    packet[length+1] = 0x01;
+    temp_channel = wi_get_channel(_wi_in); //current channel
+    if (!invalid_channel_displayed) {
+        if (temp_channel > 255) {
+            // Display error message once
+            invalid_channel_displayed = 1;
+            fprintf(stderr, "Error: Got channel %d, expected a value < 256.\n", temp_channel);
+        } else if (temp_channel < 1) {
+            invalid_channel_displayed = 1;
+            fprintf(stderr, "Error: Got channel %d, expected a value > 0.\n", temp_channel);
+        }
+    }
+    packet[length+2] = ((temp_channel > 255 || temp_channel < 1) && opt.channel != 0) ? opt.channel : temp_channel;
+
+    length += 3;
+
+    memcpy(packet +  4, smac, 6);
+    memcpy(packet + 10, opt.r_bssid, 6);
+    memcpy(packet + 16, opt.r_bssid, 6);
+
+    // TODO: See also around ~3500
+    if( opt.allwpa )
+    {
+        memcpy(packet+length, ALL_WPA2_TAGS, sizeof(ALL_WPA2_TAGS) -1);
+        length += sizeof(ALL_WPA2_TAGS) -1;
+        memcpy(packet+length, ALL_WPA1_TAGS, sizeof(ALL_WPA1_TAGS) -1);
+        length += sizeof(ALL_WPA1_TAGS) -1;
+    }
+    else
+    {
+        if(opt.wpa2type > 0)
+        {
+            memcpy(packet+length, WPA2_TAG, 22);
+            packet[length+7] = opt.wpa2type;
+            packet[length+13] = opt.wpa2type;
+            length += 22;
+        }
+
+        if(opt.wpa1type > 0)
+        {
+            memcpy(packet+length, WPA1_TAG, 24);
+            packet[length+11] = opt.wpa1type;
+            packet[length+17] = opt.wpa1type;
+            length += 24;
+        }
+    }
+
+    send_packet(packet, length);
+
+    send_packet(packet, length);
+
+    send_packet(packet, length);
+
+    free(packet);
+    return 0;
+}
+
 int packet_recv(uchar* packet, int length, struct AP_conf *apc, int external)
 {
     uchar K[64];
@@ -2485,6 +2636,7 @@ int packet_recv(uchar* packet, int length, struct AP_conf *apc, int external)
     int remaining, bytes2use;
     int reasso, fixed, temp_channel;
     uint z;
+    pESSID_t cur;
 
     struct ST_info *st_cur = NULL;
     struct ST_info *st_prv = NULL;
@@ -3070,108 +3222,36 @@ skip_probe:
             {
                 if(!opt.nobroadprobe)
                 {
-                    //transform into probe response
-                    packet[0] = 0x50;
-
-                    if(opt.verbose)
+                    if (opt.attack_broadcast && rESSID != NULL)
                     {
-                        PCT; printf("Got broadcast probe request from %02X:%02X:%02X:%02X:%02X:%02X\n",
-                                smac[0],smac[1],smac[2],smac[3],smac[4],smac[5]);
-                    }
+                        cur = rESSID;
+			pMAC_t cur2 = rBSSID2;
 
-                    //store the tagged parameters and insert the fixed ones
-                    buffer = (uchar*) malloc(length-z);
-                    memcpy(buffer, packet+z, length-z);
-
-                    memcpy(packet+z, "\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00", 12);  //fixed information
-                    packet[z+8] = (apc->interval) & 0xFF;       //beacon interval
-                    packet[z+9] = (apc->interval >> 8) & 0xFF;
-                    memcpy(packet+z+10, apc->capa, 2);          //capability
-
-                    //set timestamp
-                    gettimeofday( &tv1,  NULL );
-                    timestamp=tv1.tv_sec*1000000 + tv1.tv_usec;
-
-                    //copy timestamp into response; a mod 2^64 counter incremented each microsecond
-                    for(i=0; i<8; i++)
-                    {
-                        packet[z+i] = ( timestamp >> (i*8) ) & 0xFF;
-                    }
-
-                    //insert essid
-                    fessid = getESSID(&len);
-                    if(fessid == NULL)
-                    {
-                        fessid = "default";
-                        len = strlen(fessid);
-                    }
-                    packet[z+12] = 0x00;
-                    packet[z+13] = len;
-                    memcpy(packet+z+14, fessid, len);
-
-                    //insert tagged parameters
-                    memcpy(packet+z+14+len, buffer, length-z); //now we got 2 essid tags... ignore that
-
-                    length += 12; //fixed info
-                    free(buffer);
-                    buffer = NULL;
-                    length += 2+len; //default essid
-
-                    //add channel
-                    packet[length]   = 0x03;
-                    packet[length+1] = 0x01;
-                    temp_channel = wi_get_channel(_wi_in); //current channel
-                    if (!invalid_channel_displayed) {
-                	    if (temp_channel > 255) {
-                	    	// Display error message once
-                	    	invalid_channel_displayed = 1;
-                	    	fprintf(stderr, "Error: Got channel %d, expected a value < 256.\n", temp_channel);
-                	    } else if (temp_channel < 1) {
-							invalid_channel_displayed = 1;
-                	    	fprintf(stderr, "Error: Got channel %d, expected a value > 0.\n", temp_channel);
-						}
-					}
-                    packet[length+2] = ((temp_channel > 255 || temp_channel < 1) && opt.channel != 0) ? opt.channel : temp_channel;
-
-                    length += 3;
-
-                    memcpy(packet +  4, smac, 6);
-                    memcpy(packet + 10, opt.r_bssid, 6);
-                    memcpy(packet + 16, opt.r_bssid, 6);
-
-                    // TODO: See also around ~3500
-                    if( opt.allwpa )
-                    {
-                        memcpy(packet+length, ALL_WPA2_TAGS, sizeof(ALL_WPA2_TAGS) -1);
-                        length += sizeof(ALL_WPA2_TAGS) -1;
-                        memcpy(packet+length, ALL_WPA1_TAGS, sizeof(ALL_WPA1_TAGS) -1);
-                        length += sizeof(ALL_WPA1_TAGS) -1;
+                        // Send an answer for every SSID
+                        while(cur->next != NULL)
+                        {
+			    if (opt.f_mac)
+				memcpy(opt.r_bssid, cur2->mac, 6);
+                            fessid = cur->essid;
+                            len = cur->len;
+                            if(fessid != NULL)
+                                send_broadcast_response(fessid, len, packet, length, apc, z, smac);
+                            cur = cur->next;
+			    if (opt.f_mac && cur2->next != NULL)
+				cur2 = cur2->next;
+                        }
                     }
                     else
                     {
-                    	if(opt.wpa2type > 0)
-						{
-							memcpy(packet+length, WPA2_TAG, 22);
-							packet[length+7] = opt.wpa2type;
-							packet[length+13] = opt.wpa2type;
-							length += 22;
-						}
-
-						if(opt.wpa1type > 0)
-						{
-							memcpy(packet+length, WPA1_TAG, 24);
-							packet[length+11] = opt.wpa1type;
-							packet[length+17] = opt.wpa1type;
-							length += 24;
-						}
+                        //insert essid
+                        fessid = getESSID(&len);
+                        if(fessid == NULL)
+                        {
+                            fessid = "default";
+                            len = strlen(fessid);
+                        }
+                        send_broadcast_response(fessid, len, packet, length, apc, z, smac);
                     }
-
-                    send_packet(packet, length);
-
-                    send_packet(packet, length);
-
-                    send_packet(packet, length);
-                    return 0;
                 }
             }
         }
@@ -3931,6 +4011,9 @@ int main( int argc, char *argv[] )
     rBSSID = (pMAC_t) malloc(sizeof(struct MAC_list));
     memset(rBSSID, 0, sizeof(struct MAC_list));
 
+    rBSSID2 = (pMAC_t) malloc(sizeof(struct MAC_list));
+    memset(rBSSID, 0, sizeof(struct MAC_list));
+
     rCF = (pCF_t) malloc(sizeof(struct CF_packet));
     memset(rCF, 0, sizeof(struct CF_packet));
 
@@ -3989,7 +4072,7 @@ int main( int argc, char *argv[] )
         };
 
         int option = getopt_long( argc, argv,
-                        "a:h:i:C:I:r:w:HPe:E:c:d:D:f:W:qMY:b:B:XsS:Lx:vAz:Z:yV:0NF:G",
+                        "a:h:i:C:I:r:w:HPpe:E:m:c:d:D:f:W:qMY:b:B:XsS:Lx:vAz:Z:yV:0NF:G",
                         long_options, &option_index );
 
         if( option < 0 ) break;
@@ -4108,6 +4191,16 @@ int main( int argc, char *argv[] )
                     return( 1 );
 
                 opt.f_essid = 1;
+
+                break;
+
+	    case 'm' :
+
+                if( addESSIDAndMacfile(rBSSID2, optarg) != 0 )
+                    return( 1 );
+
+                opt.f_essid = 1;
+                opt.f_mac = 1;
 
                 break;
 
@@ -4436,6 +4529,12 @@ int main( int argc, char *argv[] )
 
                 printf( usage, getVersion("Airbase-ng", _MAJ, _MIN, _SUB_MIN, _REVISION, _BETA, _RC)  );
                 return( 1 );
+                break;
+
+            case 'p' :
+
+                opt.attack_broadcast = 1;
+                break;
 
             default : goto usage;
         }
