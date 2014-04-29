@@ -251,6 +251,7 @@ struct options
     int mitm;
     int external;
     int hidden;
+    int nobeacon;
     int interval;
     int forceska;
     int skalen;
@@ -3978,6 +3979,7 @@ int main( int argc, char *argv[] )
             {"interval",    1, 0, 'I'},
             {"mitm",        0, 0, 'M'},
             {"hidden",      0, 0, 'X'},
+            {"nobeacon",    0, 0, 'G'},
             {"caffe-latte", 0, 0, 'L'},
             {"cfrag",       0, 0, 'N'},
             {"verbose",     0, 0, 'v'},
@@ -3987,7 +3989,7 @@ int main( int argc, char *argv[] )
         };
 
         int option = getopt_long( argc, argv,
-                        "a:h:i:C:I:r:w:HPe:E:c:d:D:f:W:qMY:b:B:XsS:Lx:vAz:Z:yV:0NF:",
+                        "a:h:i:C:I:r:w:HPe:E:c:d:D:f:W:qMY:b:B:XsS:Lx:vAz:Z:yV:0NF:G",
                         long_options, &option_index );
 
         if( option < 0 ) break;
@@ -4142,6 +4144,12 @@ int main( int argc, char *argv[] )
             case 'X' :
 
                 opt.hidden = 1;
+
+                break;
+
+            case 'G' :
+
+                opt.nobeacon = 1;
 
                 break;
 
@@ -4746,14 +4754,16 @@ usage:
             printf("Couldn't set MAC on interface \"%s\".\n", ti_name(dev.dv_ti2));
         }
     }
-    //start sending beacons
-    if( pthread_create( &(beaconpid), NULL, (void *) beacon_thread,
-            (void *) &apc ) != 0 )
+    if (!opt.nobeacon)
     {
-        perror("Beacons pthread_create");
-        return( 1 );
+        //start sending beacons
+        if( pthread_create( &(beaconpid), NULL, (void *) beacon_thread,
+                (void *) &apc ) != 0 )
+        {
+            perror("Beacons pthread_create");
+            return( 1 );
+        }
     }
-
     if( opt.caffelatte )
     {
         arp = (struct ARP_req*) malloc( opt.ringbuffer * sizeof( struct ARP_req ) );
