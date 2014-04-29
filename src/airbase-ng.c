@@ -3565,6 +3565,7 @@ void beacon_thread( void *arg )
     char *essid = "";
     pESSID_t cur_essid = rESSID;
     float f, ticks[3];
+    uchar *target_mac;
 
     memcpy(&apc, arg, sizeof(struct AP_conf));
 
@@ -3632,7 +3633,12 @@ void beacon_thread( void *arg )
 
             memcpy(beacon, "\x80\x00\x00\x00", 4);  //type/subtype/framecontrol/duration
             beacon_len+=4;
-            memcpy(beacon+beacon_len , BROADCAST, 6);        //destination
+            if(getMACcount(rClient) > 0) {
+                target_mac = getMAC(rClient);
+            } else {
+                target_mac = BROADCAST;
+            }
+            memcpy(beacon+beacon_len , target_mac, 6);        //destination
             beacon_len+=6;
             if(!opt.adhoc)
                 memcpy(beacon+beacon_len, apc.bssid, 6);        //source
