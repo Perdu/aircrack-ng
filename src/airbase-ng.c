@@ -2935,7 +2935,7 @@ int packet_recv(uchar* packet, int length, struct AP_conf *apc, int external)
     else
     {
         //react on management frames
-        //probe request -> send probe response if essid matches. if brodcast probe, ignore it.
+        //probe request -> send probe response if essid matches. if broadcast probe, ignore it.
         if( packet[0] == 0x40 )
         {
             tag = parse_tags(packet+z, 0, length-z, &len);
